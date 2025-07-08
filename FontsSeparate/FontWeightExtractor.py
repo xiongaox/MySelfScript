@@ -9,16 +9,11 @@
 python3 -m venv venv
 source venv/bin/activate  # Linux/Mac
 2、安装依赖
-# 方法1：使用pip安装（系统级安装）
 pip install fonttools
-# 方法2：使用Homebrew安装（系统级安装）
-brew install fonttools
 3、运行脚本
 python3 FontWeightExtractor.py --extract 需要被转换的字体文件.ttf
 4、完成后退出虚拟环境
 deactivate
-
-
 """
 
 import os
@@ -116,6 +111,34 @@ def get_font_weight(font):
     
     return weight
 
+def get_font_names(font):
+    """获取字体的完整名称信息"""
+    names = {
+        'family': '未知',
+        'subfamily': '未知',
+        'full_name': '未知',
+        'postscript_name': '未知'
+    }
+    
+    if "name" in font:
+        name_table = font["name"]
+        
+        for record in name_table.names:
+            try:
+                name_str = record.toUnicode()
+                if record.nameID == 1:  # Family name
+                    names['family'] = name_str
+                elif record.nameID == 2:  # Subfamily name
+                    names['subfamily'] = name_str
+                elif record.nameID == 4:  # Full name
+                    names['full_name'] = name_str
+                elif record.nameID == 6:  # PostScript name
+                    names['postscript_name'] = name_str
+            except UnicodeDecodeError:
+                continue
+    
+    return names
+
 def process_variable_font(font):
     """处理可变字体，提取轴信息"""
     if "fvar" not in font:
@@ -170,9 +193,67 @@ def process_font_file(font_path, args):
             collection = TTCollection(font_path)
             print(f"TTC字体集合，包含 {len(collection)} 个字体")
             
-            for i, font in enumerate(collection.fonts):
-                print(f"\n字体 #{i+1} 在集合中:")
-                process_single_font(font, font_path, args)
+            if args.extract:
+                # 为TTC集合创建输出目录
+                output_dir = args.output or (Path(font_path).parent / "FontsOutput")
+                Path(output_dir).mkdir(exist_ok=True)
+                
+                # 用于跟踪已使用的文件名，避免重复
+                used_filenames = set()
+                
+                # 分离TTC中的每个字体
+                for i, font in enumerate(collection.fonts):
+                    print(f"\n字体 #{i+1} 在集合中:")
+                    names = get_font_names(font)
+                    print(f"字体名称: {names['family']} {names['subfamily']}")
+                    
+                    # 创建单独的TTF文件
+                    base_name = Path(font_path).stem
+                    
+                    # 构建输出文件名，包含更多信息以避免冲突
+                    family_clean = names['family'].replace(' ', '').replace('-', '')
+                    subfamily_clean = names['subfamily'].replace(' ', '').replace('-', '')
+                    
+                    # 尝试不同的命名策略
+                    possible_names = [
+                        f"{base_name}_{family_clean}_{subfamily_clean}",
+                        f"{base_name}_{family_clean}_{subfamily_clean}_{i+1}",
+                        f"{base_name}_Font{i+1}_{subfamily_clean}",
+                        f"{base_name}_Font{i+1}"
+                    ]
+                    
+                    # 选择第一个未使用的文件名
+                    output_filename = None
+                    for name in possible_names:
+                        full_name = f"{name}.ttf"
+                        if full_name not in used_filenames:
+                            output_filename = full_name
+                            used_filenames.add(full_name)
+                            break
+                    
+                    # 如果所有名称都被使用，添加时间戳
+                    if not output_filename:
+                        import time
+                        timestamp = int(time.time())
+                        output_filename = f"{base_name}_Font{i+1}_{timestamp}.ttf"
+                        used_filenames.add(output_filename)
+                    
+                    output_path = Path(output_dir) / output_filename
+                    
+                    # 保存分离的字体
+                    font.save(str(output_path))
+                    print(f"已分离到文件: {output_path}")
+                    
+                    # 获取字重信息
+                    weight = get_font_weight(font)
+                    if weight:
+                        weight_name = WEIGHT_NAMES.get(weight, "未知")
+                        print(f"字重: {weight} ({weight_name})")
+            else:
+                # 只显示信息，不分离
+                for i, font in enumerate(collection.fonts):
+                    print(f"\n字体 #{i+1} 在集合中:")
+                    process_single_font(font, font_path, args)
         else:
             # 处理单个字体
             font = ttLib.TTFont(font_path)
@@ -180,36 +261,15 @@ def process_font_file(font_path, args):
             
     except Exception as e:
         print(f"处理字体时出错: {e}")
+        import traceback
+        traceback.print_exc()
 
 def process_single_font(font, font_path, args):
     """处理单个字体对象"""
     try:
         # 获取字体名称
-        font_family = "未知"
-        font_subfamily = "未知"
-        
-        if "name" in font:
-            name_table = font["name"]
-            
-            # 获取字体家族名称(nameID=1)
-            for record in name_table.names:
-                if record.nameID == 1:
-                    try:
-                        font_family = record.toUnicode()
-                        break
-                    except UnicodeDecodeError:
-                        continue
-            
-            # 获取字体子族名称(nameID=2)
-            for record in name_table.names:
-                if record.nameID == 2:
-                    try:
-                        font_subfamily = record.toUnicode()
-                        break
-                    except UnicodeDecodeError:
-                        continue
-        
-        print(f"字体名称: {font_family} {font_subfamily}")
+        names = get_font_names(font)
+        print(f"字体名称: {names['family']} {names['subfamily']}")
         
         # 检查是否为可变字体
         is_variable = "fvar" in font
@@ -227,48 +287,14 @@ def process_single_font(font, font_path, args):
             else:
                 print("字重: 未知")
     
-        if args.extract:
+        if args.extract and not font_path.lower().endswith('.ttc'):
+            # 对于非TTC文件，使用原来的分离逻辑
             extract_font_weights(font, font_path, args.output)
     
     except Exception as e:
         print(f"处理字体对象时出错: {e}")
-
-def main():
-    # 添加parser定义
-    parser = argparse.ArgumentParser(description='字体字重提取工具')
-    parser.add_argument('paths', nargs='+', help='字体文件或目录路径')
-    parser.add_argument('--recursive', '-r', action='store_true', help='递归处理子目录')
-    parser.add_argument('--extract', '-e', action='store_true', 
-                       help='提取字体字重信息到单独文件')
-    parser.add_argument('--output', '-o', type=str, default=None,
-                       help='指定输出目录路径')
-    
-    args = parser.parse_args()
-    
-    supported_extensions = ('.ttf', '.otf', '.ttc', '.woff', '.woff2')
-    for path in args.paths:
-        path_obj = Path(path)
-        
-        if path_obj.is_file():
-            if path_obj.suffix.lower() in supported_extensions:
-                process_font_file(str(path_obj), args)
-            else:
-                print(f"跳过不支持的文件: {path}")
-        
-        elif path_obj.is_dir():
-            if args.recursive:
-                # 递归处理
-                for file_path in path_obj.glob('**/*'):
-                    if file_path.is_file() and file_path.suffix.lower() in supported_extensions:
-                        process_font_file(str(file_path), args)
-            else:
-                # 只处理当前目录
-                for file_path in path_obj.glob('*'):
-                    if file_path.is_file() and file_path.suffix.lower() in supported_extensions:
-                        process_font_file(str(file_path), args)
-        
-        else:
-            print(f"路径不存在: {path}")
+        import traceback
+        traceback.print_exc()
 
 def extract_font_weights(font, font_path, output_dir=None):
     """根据字重信息分离字体文件"""
@@ -338,6 +364,42 @@ def extract_font_weights(font, font_path, output_dir=None):
             output_path = output_base / f"{font_name}_{weight_name}.ttf"
             shutil.copy2(font_path, output_path)
             print(f"已复制字重 {weight_name} ({weight}) 到文件: {output_path}")
+
+def main():
+    parser = argparse.ArgumentParser(description='字体字重提取工具')
+    parser.add_argument('paths', nargs='+', help='字体文件或目录路径')
+    parser.add_argument('--recursive', '-r', action='store_true', help='递归处理子目录')
+    parser.add_argument('--extract', '-e', action='store_true', 
+                       help='提取字体字重信息到单独文件')
+    parser.add_argument('--output', '-o', type=str, default=None,
+                       help='指定输出目录路径')
+    
+    args = parser.parse_args()
+    
+    supported_extensions = ('.ttf', '.otf', '.ttc', '.woff', '.woff2')
+    for path in args.paths:
+        path_obj = Path(path)
+        
+        if path_obj.is_file():
+            if path_obj.suffix.lower() in supported_extensions:
+                process_font_file(str(path_obj), args)
+            else:
+                print(f"跳过不支持的文件: {path}")
+        
+        elif path_obj.is_dir():
+            if args.recursive:
+                # 递归处理
+                for file_path in path_obj.glob('**/*'):
+                    if file_path.is_file() and file_path.suffix.lower() in supported_extensions:
+                        process_font_file(str(file_path), args)
+            else:
+                # 只处理当前目录
+                for file_path in path_obj.glob('*'):
+                    if file_path.is_file() and file_path.suffix.lower() in supported_extensions:
+                        process_font_file(str(file_path), args)
+        
+        else:
+            print(f"路径不存在: {path}")
 
 if __name__ == "__main__":
     main()
